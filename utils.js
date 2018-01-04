@@ -1,17 +1,3 @@
-// This file is part of RECAP for Chrome.
-// Copyright 2013 Ka-Ping Yee <ping@zesty.ca>
-//
-// RECAP for Chrome is free software: you can redistribute it and/or modify it
-// under the terms of the GNU General Public License as published by the Free
-// Software Foundation, either version 3 of the License, or (at your option)
-// any later version.  RECAP for Chrome is distributed in the hope that it will
-// be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-// Public License for more details.
-//
-// You should have received a copy of the GNU General Public License along with
-// RECAP for Chrome.  If not, see: http://www.gnu.org/licenses/
-
 // -------------------------------------------------------------------------
 // Browser-specific utilities for use in background pages and content scripts.
 
@@ -59,11 +45,11 @@
 // Makes a singleton instance in a background page callable from a content
 // script, using Chrome's message system.  See above for details.
 function exportInstance(constructor) {
-  var name = constructor.name;  // function name identifies the service
-  var instance = new constructor();
-  chrome.extension.onMessage.addListener(function (request, sender, cb) {
+  let name = constructor.name;  // function name identifies the service
+  let instance = new constructor();
+  chrome.runtime.onMessage.addListener(function (request, sender, cb) {
     if (request.name === name) {
-      var pack = function () { cb(Array.prototype.slice.apply(arguments)); };
+      let pack = function () { cb(Array.prototype.slice.apply(arguments)); };
       pack.tab = sender.tab;
       instance[request.verb].apply(instance, request.args.concat([pack]));
       return true;  // allow cb to be called after listener returns
@@ -85,7 +71,7 @@ function importInstance(constructor) {
           throw 'Service invocation error: last argument is not a callback';
         }
         var unpack = function (results) { cb.apply(null, results); };
-        chrome.extension.sendMessage(
+        chrome.runtime.sendMessage(
           {name: name, verb: verb, args: args}, unpack);
       };
     })(verb);
@@ -93,31 +79,41 @@ function importInstance(constructor) {
   return sender;
 }
 
+function getHostname(url){
+  // Extract the hostname from a URL.
+  return $('<a>').prop('href', url).prop('hostname');
+}
+
 // Makes an XHR to the given URL, calling a callback with the returned content
 // type and response (interpreted according to responseType).  See XHR2 spec
 // for details on responseType and response.  Uses GET if postData is null or
 // POST otherwise.  postData can be any type accepted by XMLHttpRequest.send().
-function httpRequest(url, postData, responseType, callback) {
-  var type = null,
+function httpRequest(url, postData, callback) {
+  let type = null,
       result = null,
-      xhr = new XMLHttpRequest();
-  // WebKit doesn't support responseType 'json' yet, but probably will soon.
-  xhr.responseType = responseType === 'json' ? 'text' : responseType;
+      xhr;
+
+    // Firefox requires a special call to get an XMLHttpRequest() that
+    // sends Referer headers, which is CMECF needs because of their
+    // choice in how to fix the 2017 cross-site/same-origin security
+    // vulnerability.
+    try {
+        // Firefox. See: https://discourse.mozilla.org/t/webextension-xmlhttprequest-issues-no-cookies-or-referrer-solved/11224/18
+        xhr = XPCNativeWrapper(new window.wrappedJSObject.XMLHttpRequest());
+    }
+    catch (evt) {
+        // Chrome.
+        xhr = new XMLHttpRequest();
+    }
+
+  xhr.responseType = 'arraybuffer';
   xhr.onreadystatechange = function () {
     if (xhr.readyState === 4) {
       if (xhr.status === 200) {
         type = xhr.getResponseHeader('Content-Type');
         result = xhr.response;
-        if (responseType === 'json') {
-          try {
-            result = JSON.parse(result);
-          } catch (e) {
-            // Don't bother calling the callback if there's no valid JSON.
-            return;
-          }
-        }
       }
-      callback && callback(type, result);
+      callback && callback(type, result, xhr);
     }
   };
   if (postData) {
@@ -129,14 +125,46 @@ function httpRequest(url, postData, responseType, callback) {
   }
 }
 
+// Default settings for any jquery $.ajax call.
+$.ajaxSetup({
+  beforeSend: function (xhr, settings) {
+    let hostname = getHostname(settings.url);
+    if (hostname === "www.courtlistener.com") {
+        // If you are reading this code, we ask that you please refrain from
+        // using this token. Unfortunately, there is no way to distribute
+        // extensions that use hardcoded tokens except through begging and using
+        // funny variable names. Do not abuse the RECAP service.
+        let asdf = '45c7946dd8400ad62662565cf79da3c081d9b0e5';
+        xhr.setRequestHeader("Authorization", `Token ${asdf}`);
+    }
+  }
+});
+
+
 // Converts an ArrayBuffer to a regular array of unsigned bytes.  Array.apply()
 // causes a "maximum call stack size exceeded" error for buffers of only 300k,
 // so we need this ridiculous circumlocution of breaking the data into chunks.
 function arrayBufferToArray(ab) {
-  var chunks = [];
-  for (var i = 0; i < ab.byteLength; i += 100000) {
-    var slice = new Uint8Array(ab, i, Math.min(100000, ab.byteLength - i));
+  let chunks = [];
+  for (let i = 0; i < ab.byteLength; i += 100000) {
+    let slice = new Uint8Array(ab, i, Math.min(100000, ab.byteLength - i));
     chunks.push(Array.apply(null, slice));  // convert each chunk separately
   }
   return [].concat.apply([], chunks);  // concatenate all the chunks together
+}
+
+// Debug logging function. First argument is a debug level, remainder are variable args
+// for console.log(). If the global debug level matches the first arg, calls console.log().
+// Example usage:
+//    debug(5, "This message is only seen when the debug level is %d or higher.", 5);
+// Debug levels:
+//   1   General informational
+//   3   Developer debugging
+var DEBUGLEVEL = 1;
+function debug(level, varargs) {
+  if (DEBUGLEVEL >= level) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    args[0] = `RECAP debug [${level}]: `+args[0];
+    return console.log.apply(this, args);
+  }
 }

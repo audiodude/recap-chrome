@@ -1,17 +1,3 @@
-// This file is part of RECAP for Chrome.
-// Copyright 2013 Ka-Ping Yee <ping@zesty.ca>
-//
-// RECAP for Chrome is free software: you can redistribute it and/or modify it
-// under the terms of the GNU General Public License as published by the Free
-// Software Foundation, either version 3 of the License, or (at your option)
-// any later version.  RECAP for Chrome is distributed in the hope that it will
-// be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
-// Public License for more details.
-//
-// You should have received a copy of the GNU General Public License along with
-// RECAP for Chrome.  If not, see: http://www.gnu.org/licenses/
-
 // -------------------------------------------------------------------------
 // Abstraction of PACER site and services.  This file is browser-independent.
 
@@ -40,20 +26,39 @@
 // Pages marked (*) cost money.  The "Single document page" is a page that
 // tells you how much a document will cost before you get to view the PDF.
 
+let PACER_TO_CL_IDS = {
+    'azb': 'arb',         // Arizona Bankruptcy Court
+    'cofc': 'uscfc',      // Court of Federal Claims
+    'neb': 'nebraskab',   // Nebraska Bankruptcy
+    'nysb-mega': 'nysb'   // Remove the mega thing
+};
+
 // Public constants and pure functions.  As these are pure, they can be freely
 // called from anywhere; by convention we use an ALL_CAPS name to allude to
 // the purity (const-ness) of this object's contents.
-PACER = {
+let PACER = {
   // Returns the court identifier for a given URL, or null if not a PACER site.
   getCourtFromUrl: function (url) {
-    var match = (url || '').toLowerCase().match(
+    let match = (url || '').toLowerCase().match(
         /^\w+:\/\/(ecf|ecf-train|pacer)\.(\w+)\.uscourts\.gov\//);
     return match ? match[2] : null;
   },
 
+  convertToCourtListenerCourt: function(pacer_court_id) {
+    return PACER_TO_CL_IDS[pacer_court_id] || pacer_court_id;
+  },
+
   // Returns true if the given URL looks like a link to a PACER document.
+  // For CMECF District:
+  //   https://ecf.dcd.uscourts.gov/doc1/04503837920
+  // For CMECF Appellate:
+  //   https://ecf.ca2.uscourts.gov/docs1/00205695758
   isDocumentUrl: function (url) {
-    if (url.match(/\/doc1\/\d+/) || url.match(/\/cgi-bin\/show_doc/)) {
+    if (
+        url.match(/\/(?:doc1|docs1)\/\d+/) ||
+        url.match(/\/cgi-bin\/show_doc/) ||
+        url.match(/servlet=ShowDoc/)
+    ) {
       if (PACER.getCourtFromUrl(url)) {
         return true;
       }
@@ -61,62 +66,174 @@ PACER = {
     return false;
   },
 
-  // Returns true if a URL looks like a show_doc link that needs conversion.
-  isConvertibleDocumentUrl: function (url) {
-    if (url.match(/\/cgi-bin\/show_doc/)) {
-      if (PACER.getCourtFromUrl(url)) {
-        return true;
-      }
-    }
-    return false;
-  },
-
-  // Returns true if the URL is for the form for querying the list of documents
-  // in a docket (i.e. the "Docket Sheet" or "History/Documents" query page).
+  // Returns true if the URL is for docket query page.
   isDocketQueryUrl: function (url) {
     // The part after the "?" is all digits.
-    return url.match(/\/(DktRpt|HistDocQry)\.pl\?\d+$/) ? true : false;
-  },
-
-  // Given a URL that satisfies isDocketQueryUrl, gets its case number.
-  getCaseNumberFromUrl: function (url) {
-    var match = url.match(/\?(\d+)$/);
-    return match ? match[1] : null;
+    return !!url.match(/\/(DktRpt|HistDocQry)\.pl\?\d+$/);
   },
 
   // Returns true if the given URL is for a docket display page (i.e. the page
-  // after submitting the "Docket Sheet" or "History/Documents" query page).
+  // after submitting the "Docket Sheet" query page).
   isDocketDisplayUrl: function (url) {
     // The part after the "?" has hyphens in it.
-    return url.match(/\/(DktRpt|HistDocQry)\.pl\?\w+-[\w-]+$/) ? true : false;
+    //   https://ecf.dcd.uscourts.gov/cgi-bin/DktRpt.pl?591030040473392-L_1_0-1
+    // Appellate:
+    //   https://ecf.ca1.uscourts.gov/n/beam/servlet/TransportRoom?servlet=CaseSummary.jsp&caseNum=16-1567&incOrigDkt=Y&incDktEntries=Y
+    if (url.match(/\/DktRpt\.pl\?\w+-[\w-]+$/)) { return true; }
+    let match;
+//
+    if (match = url.match(/servlet\/TransportRoom(?:\?servlet=([^?&]+)(?:[\/&#;].*)?)?$/)) {
+      let servlet = match[1];
+      debug(4, `Identified appellate servlet ${servlet} at ${url}`);
+
+      switch(servlet) {
+      case 'CaseSummary.jsp':
+      case 'ShowPage': // what is this?
+      case undefined:
+	return true;
+	break;
+
+      default:
+	debug(4, `Assuming servlet ${servlet} is not a docket.`);
+      case 'CaseSearch.jsp':
+      case 'ShowDoc':
+      case 'ShowDocMulti':
+      case 'CaseSelectionTable':
+      case 'CourtInfo.jsp':
+      case 'DocketReportFilter.jsp':
+      case 'InvalidUserLogin.jsp':
+      case 'OrderJudgment.jsp':
+      case 'PACERCalendar.jsp':
+      case 'PacerHelp.jsp':
+      case 'PACEROpinion.jsp':
+      case 'Login':
+      case 'k2aframe.jsp': // attorney/java?
+      case 'k2ajnlp.jsp':
+      case 'RSSGenerator': // maybe we should upload rss?
+      case 'PaymentHistory':
+      case 'ChangeClient.jsp':
+	return false;
+      }
+    }
+  },
+
+  // Returns true if the given URL is for a docket history display page.
+  isDocketHistoryDisplayUrl: function (url) {
+    return !!url.match(/\/HistDocQry\.pl\?\w+-[\w-]+$/);
   },
 
   // Returns true if this is a "Document Selection Menu" page (a list of the
   // attachments for a particular document).
   isAttachmentMenuPage: function (url, document) {
-    var inputs = document.getElementsByTagName('input');
-    var pageCheck = url.match(/\/doc1\/\d+/) &&
+    let inputs = document.getElementsByTagName('input');
+    let pageCheck = PACER.isDocumentUrl(url) &&
       inputs.length &&
       inputs[inputs.length - 1].value === 'Download All';
-    return pageCheck ? true : false;
+    return !!pageCheck;
   },
 
   // Returns true if this is a page for downloading a single document.
+  // district:
+  //   https://ecf.dcd.uscourts.gov/doc1/04503837920
+  // appellate:
+  //   https://ecf.ca1.uscourts.gov/n/beam/servlet/TransportRoom?servlet=ShowDoc&dls_id=00107215565&caseId=41182&dktType=dktPublic
   isSingleDocumentPage: function (url, document) {
-    var inputs = document.getElementsByTagName('input');
-    var pageCheck = (url.match(/\/doc1\/\d+/) && inputs.length &&
-                     inputs[inputs.length - 1].value === 'View Document');
-    return pageCheck ? true : false;
+    let inputs = document.getElementsByTagName('input');
+    let lastInput = inputs.length && inputs[inputs.length - 1].value;
+    let pageCheck = (PACER.isDocumentUrl(url) &&
+                     (lastInput === 'View Document') ||
+                     (lastInput === 'Accept Charges and Retrieve'));
+    debug(4," lastInput "+lastInput);
+    return !!pageCheck;
   },
 
   // Returns the document ID for a document view page or single-document page.
   getDocumentIdFromUrl: function (url) {
-    var match = (url || '').match(/\/doc1\/(\d+)$/);
+    let match = (url || '').match(/\/(?:doc1|docs1)\/(\d+)/);
     if (match) {
-      // Some PACER sites use the fourth digit of the docid to flag whether
-      // the user has been shown a receipt page.  We don't care about that,
-      // so we always set the fourth digit to 0 when getting a document ID.
+      // PACER sites use the fourth digit of the pacer_doc_id to flag whether
+      // the user has been shown a receipt page.  We don't care about that, so
+      // we always set the fourth digit to 0 when getting a doc ID.
       return match[1].slice(0, 3) + '0' + match[1].slice(4);
+    }
+  },
+
+  // Get the document ID for a document view page using the "View Document"
+  // form.
+  getDocumentIdFromForm: function(url, document){
+    if (PACER.isDocumentUrl(url)) {
+      let inputs = document.getElementsByTagName('input');
+      let last_input = inputs[inputs.length - 1];
+      if (inputs.length && last_input.value === 'View Document') {
+        // Grab the document ID from the form's onsubmit attribute
+        let onsubmit = last_input.form.getAttribute('onsubmit');
+        let goDLS = PACER.parseGoDLSFunction(onsubmit);
+        return PACER.getDocumentIdFromUrl(goDLS.hyperlink);
+      }
+    }
+  },
+
+  // Given a URL that satisfies isDocketQueryUrl, gets its case number.
+  getCaseNumberFromUrls: function (urls) {
+    // Iterate over an array of URLs and get the case number from the
+    // first one that matches. Because the calling function may pass us URLs
+    // other than the page URL, such as referrers, we narrow to
+    // *uscourts.gov. (Page URLs are so limited by the "include_globs" in
+    // manifest.json; but referrers are not.)
+    for (let url of urls) {
+      let hostname = getHostname(url);
+      // JS is trash. It lacks a way of getting the TLD, so we use endsWith.
+      if (hostname.endsWith('uscourts.gov')) {
+        for (let re of [
+	  // Appellate CMECF sends us some odd URLs, be aware:
+	  // https://ecf.mad.uscourts.gov/cgi-bin/DktRpt.pl?caseNumber=1:17-cv-11842-PBS&caseId=0
+	  // https://ecf.mad.uscourts.gov/cgi-bin/DktRpt.pl?caseNumber=1:17-cv-11842-PBS&caseId=1:17-cv-11842-PBS
+          /[?&]caseid=(\d+)/i, // match on caseid GET param
+          /\?(\d+)(?:&.*)?$/,  // match on DktRpt.pl?178502&blah urls
+        ]){
+          let match = url.match(re);
+          if (match){
+            debug(3, "Found caseid via: " + match[0]);
+            if (match[1] === '0'){
+              // Appellate CMECF calls District CMECF with caseId=0 when it doesn't
+              // know the caseid. Ignore that special case here.
+              continue;
+            }
+            return match[1];
+          }
+        }
+        // xxx does not match style above.
+        let match;
+        if (match = url.match(/[?&]caseNum=([-\d]+)/)) {
+          // Appellate. Actually this is a docket number. Uhoh? xxx
+          debug(3, "Found caseNum via: " + match[0]);
+          return match[1];
+        } else if (match = url.match(/[?&]caseId=([-\d]+)/)) {
+          debug(3, "Found caseId via: " + match[0]);
+          // Also seen in appellate. Note upppercase 'I' and hyphens. Actual caseID. xxx
+          return match[1];
+        }
+      }
+    }
+  },
+
+  getCaseNumberFromInputs: function(url, document){
+    if (PACER.isDocumentUrl(url)){
+      let inputs = document.getElementsByTagName('input');
+      let last_input = inputs[inputs.length -1];
+      if (inputs.length && last_input.value === "Download All") {
+        // Attachment page.
+        let onclick = last_input.getAttribute("onclick");
+        let match = onclick.match(/[?&]caseid=(\d+)/i);
+        if (match && match[1] !== '0'){
+          return match[1];
+        }
+      } else if (inputs.length && last_input.value === "View Document") {
+        // Download receipt page.
+        let onsubmit = last_input.form.getAttribute("onsubmit");
+        let goDLS = PACER.parseGoDLSFunction(onsubmit);
+        return goDLS.de_caseid;
+      }
     }
   },
 
@@ -125,19 +242,45 @@ PACER = {
     return url.replace(/\?.*/, '').replace(/.*\//, '');
   },
 
+  // Parse the goDLS function returning its parameters as a dict.
+  parseGoDLSFunction: function (goDLS_string){
+    // CMECF provides extra information on Document Links (DLS?) in the goDLS()
+    // function of an onclick handler, e.g.:
+    //
+    //   <a href="https://ecf.mad.uscourts.gov/doc1/09518360046"
+    //      onclick="goDLS('/doc1/09518360046','153992','264','','','1','','');
+    //               return(false);">95</a>
+    //
+    // This is similarly used in the onsubmit function of some forms.
+    //
+    // The parameters are defined in the unminified js
+    //   https://ecf.flnd.uscourts.gov/lib/dls_url.js
+    // as:
+    //   function goDLS(hyperlink, de_caseid, de_seqno, got_receipt,
+    //                  pdf_header, pdf_toggle_possible, magic_num, hdr)
+    let goDLS = goDLS_string.match(/^goDLS\('([^']*)','([^']*)','([^']*)','([^']*)','([^']*)','([^']*)','([^']*)','([^']*)'\)/);
+    if (!goDLS) {
+      return false;
+    }
+    let r = {};
+    [, r.hyperlink, r.de_caseid, r.de_seqno, r.got_receipt,
+	 r.pdf_header, r.pdf_toggle_possible, r.magic_num, r.hdr] = goDLS;
+    return r;
+  },
+
   // Given document.cookie, returns true if the user is logged in to PACER.
   hasPacerCookie: function (cookieString) {
-    var cookies = {};
+    let cookies = {};
     cookieString.replace(/\s*([^=;]+)=([^;]*)/g, function (match, name, value) {
       cookies[name.trim()] = value.trim();
     });
-    var pacerCookie = cookies['PacerUser'] || cookies['PacerSession'];
-    return pacerCookie && !pacerCookie.match(/unvalidated/) ? true : false;
+    let pacerCookie = cookies['PacerUser'] || cookies['PacerSession'];
+    return !!(pacerCookie && !pacerCookie.match(/unvalidated/));
   },
 
   // Returns true if the given court identifier is for an appellate court.
   isAppellateCourt: function (court) {
-    return PACER.APPELLATE_COURTS[court] ? true : false;
+    return !!PACER.APPELLATE_COURTS[court];
   },
 
   // These are all the supported PACER court identifiers, together with their
@@ -351,26 +494,4 @@ PACER = {
     'cadc': 1,
     'cafc': 1
   }
-};
-
-// Public impure functions.  (See utils.js for details on defining services.)
-function Pacer() {
-  return {
-    // Converts a show_doc URL into a doc1-style URL, calling the callback with
-    // the arguments (doc1_url, docid, caseid, de_seq_num, dm_id, doc_num).
-    convertDocumentUrl: function (url, callback) {
-      var schemeHost = url.match(/^\w+:\/\/[^\/]+/)[0];
-      var query = url.match(/\?.*/)[0];
-      var data = {};
-      // The parameters only contain digits, so we don't need to unescape.
-      query.replace(/([^=?&]+)=([^&]*)/g, function (p, k, v) { data[k] = v; });
-      // PACER uses a crazy query encoding with "K" and "V" as delimiters.
-      query = query.replace(/[?&]/g, 'K').replace(/=/g, 'V');
-      httpRequest(schemeHost + '/cgi-bin/document_link.pl?document' + query,
-                  null, 'text', function (type, text) {
-        callback(text, PACER.getDocumentIdFromUrl(text),
-                 data.caseid, data.de_seq_num, data.dm_id, data.doc_num);
-      });
-    }
-  };
 };
